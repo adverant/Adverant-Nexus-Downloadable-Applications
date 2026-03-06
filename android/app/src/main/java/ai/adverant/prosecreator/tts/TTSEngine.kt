@@ -16,9 +16,11 @@ import java.nio.ByteOrder
  * Loads the Kokoro-en-v0_19 ONNX model and generates PCM audio,
  * then encodes as WAV (16-bit, 24000 Hz mono).
  *
+ * Voice selection uses speaker IDs mapped from voices.bin. The voices
+ * are embedded in alphabetical order within the single voices.bin file.
+ *
  * Thread-safe: synthesize() is synchronized to prevent concurrent ONNX sessions
- * from corrupting each other (sherpa-onnx is not inherently thread-safe for a
- * single model instance).
+ * from corrupting each other.
  */
 class TTSEngine private constructor(
     private val tts: OfflineTts,
@@ -32,10 +34,10 @@ class TTSEngine private constructor(
         private const val NUM_CHANNELS = 1
 
         /**
-         * All Kokoro voice presets — 54 voices organized by language/gender.
-         * These match the .bin files in the voices/ directory.
+         * All Kokoro voice presets — sorted alphabetically.
+         * Speaker IDs in voices.bin follow this exact order (0-indexed).
          */
-        val KOKORO_VOICES: Map<String, String> = mapOf(
+        val KOKORO_VOICES: Map<String, String> = linkedMapOf(
             // American Female
             "af_alloy" to "Alloy (American Female)",
             "af_aoede" to "Aoede (American Female)",
@@ -68,6 +70,12 @@ class TTSEngine private constructor(
             "bm_george" to "George (British Male)",
             "bm_lewis" to "Lewis (British Male)",
         )
+
+        /**
+         * Sorted voice IDs — index = speaker ID in voices.bin.
+         * This is the canonical ordering used by sherpa-onnx.
+         */
+        private val SORTED_VOICE_IDS: List<String> = KOKORO_VOICES.keys.sorted()
 
         /** Default voice for narration */
         const val DEFAULT_VOICE = "af_sky"
@@ -113,7 +121,8 @@ class TTSEngine private constructor(
                 )
 
                 val tts = OfflineTts(config = config)
-                Log.i(TAG, "TTSEngine initialized: sampleRate=${tts.sampleRate()}")
+                Log.i(TAG, "TTSEngine initialized: sampleRate=${tts.sampleRate()}, " +
+                        "numSpeakers=${tts.numSpeakers()}, voices=${SORTED_VOICE_IDS.size}")
 
                 TTSEngine(tts, modelDir)
             } catch (e: Exception) {
@@ -127,7 +136,7 @@ class TTSEngine private constructor(
      * Synthesize text to WAV audio bytes.
      *
      * @param text Input text to synthesize.
-     * @param voice Voice preset ID (e.g., "af_sky"). Must match a .bin file in voices/.
+     * @param voice Voice preset ID (e.g., "af_sky").
      * @param speed Speech speed multiplier (0.5 - 2.0). Default 1.0.
      * @return WAV audio as ByteArray, or null on failure.
      */
@@ -137,6 +146,8 @@ class TTSEngine private constructor(
 
         return try {
             val speakerId = resolveVoiceSpeakerId(voice)
+            Log.d(TAG, "Synthesizing: voice=$voice sid=$speakerId speed=$speed text=${text.take(50)}")
+
             val audio = tts.generateWithCallback(
                 text = text,
                 sid = speakerId,
@@ -162,28 +173,18 @@ class TTSEngine private constructor(
     fun getSampleRate(): Int = tts.sampleRate()
 
     /**
-     * Get list of available voices (those with .bin files present).
+     * Get list of available voices.
+     * With voices.bin, all voices are available.
      */
     fun getAvailableVoices(): Map<String, String> {
-        val voicesDir = File(modelDir, "voices")
-        if (!voicesDir.exists()) return KOKORO_VOICES // return all if no voices dir
-
-        val availableBins = voicesDir.listFiles()
-            ?.filter { it.extension == "bin" }
-            ?.map { it.nameWithoutExtension }
-            ?.toSet()
-            ?: return KOKORO_VOICES
-
-        return KOKORO_VOICES.filter { (id, _) -> availableBins.contains(id) }
-            .ifEmpty { KOKORO_VOICES } // fallback to full list if filter yields nothing
+        return KOKORO_VOICES
     }
 
     /**
      * Check if a specific voice is available.
      */
     fun isVoiceAvailable(voiceId: String): Boolean {
-        val voiceFile = File(modelDir, "voices/$voiceId.bin")
-        return voiceFile.exists()
+        return KOKORO_VOICES.containsKey(voiceId)
     }
 
     /**
@@ -191,8 +192,6 @@ class TTSEngine private constructor(
      */
     fun release() {
         try {
-            // OfflineTts handles its own cleanup via finalizer;
-            // explicit release not exposed in the Java API.
             Log.i(TAG, "TTSEngine released")
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing TTSEngine", e)
@@ -204,22 +203,15 @@ class TTSEngine private constructor(
     /**
      * Resolve a voice name to a speaker ID.
      *
-     * sherpa-onnx Kokoro uses speaker ID (int) for voice selection.
-     * The mapping is alphabetical order of voice .bin files.
-     * We maintain a sorted list and find the index.
+     * sherpa-onnx Kokoro voices.bin embeds all voice presets in alphabetical order.
+     * Speaker ID = index in the sorted voice list (0-based).
      */
     private fun resolveVoiceSpeakerId(voice: String): Int {
-        val voicesDir = File(modelDir, "voices")
-        if (!voicesDir.exists()) return 0
-
-        val sortedVoices = voicesDir.listFiles()
-            ?.filter { it.extension == "bin" }
-            ?.map { it.nameWithoutExtension }
-            ?.sorted()
-            ?: return 0
-
-        val idx = sortedVoices.indexOf(voice)
-        return if (idx >= 0) idx else 0
+        val idx = SORTED_VOICE_IDS.indexOf(voice)
+        return if (idx >= 0) idx else {
+            Log.w(TAG, "Unknown voice '$voice', falling back to $DEFAULT_VOICE")
+            SORTED_VOICE_IDS.indexOf(DEFAULT_VOICE).coerceAtLeast(0)
+        }
     }
 
     /**

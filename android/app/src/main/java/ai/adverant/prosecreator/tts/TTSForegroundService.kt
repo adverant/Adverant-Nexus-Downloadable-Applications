@@ -17,12 +17,9 @@ import java.io.File
  * a persistent notification ensures the TTS server stays running while the user
  * is writing in ProseCreator on their desktop browser.
  *
- * Lifecycle:
- *   1. MainActivity binds to this service and calls startServer()
- *   2. Service starts as foreground with a "TTS Server Running" notification
- *   3. TTSEngine loads the Kokoro model, TTSServer starts on port 8881
- *   4. User stops via the notification action or the in-app button
- *   5. Service stops server, releases engine, stops foreground
+ * IMPORTANT: startForeground() is called immediately in onStartCommand() to comply
+ * with Android's 10-second foreground service deadline. Heavy initialization
+ * (model loading, server start) happens after the notification is posted.
  */
 class TTSForegroundService : Service() {
 
@@ -59,6 +56,16 @@ class TTSForegroundService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+
+        // CRITICAL: Call startForeground() immediately to avoid
+        // ForegroundServiceDidNotStartInTimeException (10-second deadline).
+        // Show a "Starting..." notification; update it when server is ready.
+        try {
+            startForeground(NOTIFICATION_ID, createStartingNotification())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground", e)
+        }
+
         return START_STICKY
     }
 
@@ -83,6 +90,7 @@ class TTSForegroundService : Service() {
             val engine = TTSEngine.create(modelDir)
             if (engine == null) {
                 Log.e(TAG, "Failed to create TTSEngine")
+                updateNotification(createErrorNotification("Failed to load TTS model"))
                 return false
             }
             ttsEngine = engine
@@ -95,13 +103,14 @@ class TTSForegroundService : Service() {
             isServerRunning = true
             Log.i(TAG, "TTS server started on port ${TTSServer.DEFAULT_PORT}")
 
-            // Start foreground with notification
-            startForeground(NOTIFICATION_ID, createNotification())
+            // Update notification to show running state
+            updateNotification(createRunningNotification())
             onStateChanged?.invoke(true)
 
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start server", e)
+            updateNotification(createErrorNotification("Server failed: ${e.message?.take(50)}"))
             stopServer()
             false
         }
@@ -135,38 +144,68 @@ class TTSForegroundService : Service() {
      */
     fun getServer(): TTSServer? = ttsServer
 
-    // ── Notification ────────────────────────────────────────────────────
+    // ── Notifications ───────────────────────────────────────────────────
 
-    private fun createNotification(): Notification {
-        // Intent to open the app when notification is tapped
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+    private fun updateNotification(notification: Notification) {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+            nm.notify(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to update notification", e)
         }
-        val openPending = PendingIntent.getActivity(
-            this, 0, openIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+    }
 
-        // Intent to stop the server from the notification
-        val stopIntent = Intent(this, TTSForegroundService::class.java).apply {
-            action = ACTION_STOP
-        }
-        val stopPending = PendingIntent.getService(
-            this, 0, stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+    private fun createStartingNotification(): Notification {
+        return NotificationCompat.Builder(this, TTSApplication.CHANNEL_ID)
+            .setContentTitle("ProseCreator TTS")
+            .setContentText("Starting TTS server...")
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setOngoing(true)
+            .setContentIntent(createOpenIntent())
+            .build()
+    }
 
+    private fun createRunningNotification(): Notification {
         return NotificationCompat.Builder(this, TTSApplication.CHANNEL_ID)
             .setContentTitle("ProseCreator TTS")
             .setContentText("TTS server running on port ${TTSServer.DEFAULT_PORT}")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
-            .setContentIntent(openPending)
+            .setContentIntent(createOpenIntent())
             .addAction(
                 android.R.drawable.ic_media_pause,
                 "Stop Server",
-                stopPending
+                createStopIntent()
             )
             .build()
+    }
+
+    private fun createErrorNotification(message: String): Notification {
+        return NotificationCompat.Builder(this, TTSApplication.CHANNEL_ID)
+            .setContentTitle("ProseCreator TTS")
+            .setContentText(message)
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setContentIntent(createOpenIntent())
+            .build()
+    }
+
+    private fun createOpenIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        return PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    private fun createStopIntent(): PendingIntent {
+        val intent = Intent(this, TTSForegroundService::class.java).apply {
+            action = ACTION_STOP
+        }
+        return PendingIntent.getService(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 }

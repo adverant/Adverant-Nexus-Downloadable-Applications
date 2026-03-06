@@ -12,14 +12,13 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
 /**
- * ModelDownloader — Downloads and extracts the Kokoro TTS model from sherpa-onnx releases.
+ * ModelDownloader — Downloads and extracts the Kokoro TTS model.
  *
- * Downloads the pre-packaged model archive (~100MB) to the app's internal storage.
- * The archive contains:
- *   - model.onnx          — Kokoro 82M ONNX model
+ * Downloads a pre-packaged zip (~300MB) from our GitHub Release containing:
+ *   - model.onnx          — Kokoro 82M ONNX model (330MB uncompressed)
  *   - tokens.txt           — Tokenizer vocabulary
- *   - voices/{name}.bin     — Voice preset embeddings
- *   - espeak-ng-data/       — Phonemizer data (if included)
+ *   - voices.bin           — All voice embeddings in a single file (5.5MB)
+ *   - espeak-ng-data/      — Phonemizer data
  *
  * Progress is reported via callback for UI updates.
  */
@@ -29,34 +28,11 @@ class ModelDownloader(private val context: Context) {
         private const val TAG = "ModelDownloader"
 
         /**
-         * sherpa-onnx release URL for Kokoro English model.
-         * This is the pre-packaged archive with model + tokens + voices.
+         * Our GitHub Release URL for the pre-packaged Kokoro model zip.
+         * Public, no auth required.
          */
-        private const val MODEL_URL =
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-kokoro-medium.tar.bz2"
-
-        /**
-         * Alternative: individual file downloads from HuggingFace.
-         * Used if the archive URL is unavailable.
-         */
-        private const val HF_BASE =
-            "https://huggingface.co/k2-fsa/sherpa-onnx-kokoro-en-v0_19/resolve/main"
-
-        /** Files to download individually from HuggingFace */
-        private val HF_FILES = listOf(
-            "model.onnx",
-            "tokens.txt",
-        )
-
-        /** Voice files to download individually */
-        private val VOICE_FILES = listOf(
-            "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica",
-            "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
-            "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",
-            "am_michael", "am_onyx", "am_puck",
-            "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
-            "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
-        )
+        private const val MODEL_ZIP_URL =
+            "https://github.com/adverant/Adverant-Nexus-Downloadable-Applications/releases/download/v1.0.0/kokoro-model-android.zip"
 
         /** Model directory name inside app's internal files */
         const val MODEL_DIR_NAME = "kokoro-en-v0_19"
@@ -72,7 +48,7 @@ class ModelDownloader(private val context: Context) {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(300, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
 
@@ -90,16 +66,16 @@ class ModelDownloader(private val context: Context) {
         val dir = getModelDir()
         val modelFile = File(dir, "model.onnx")
         val tokensFile = File(dir, "tokens.txt")
-        val voicesDir = File(dir, "voices")
+        val voicesFile = File(dir, "voices.bin")
 
         val ready = modelFile.exists() &&
+                modelFile.length() > 1_000_000 && // model should be >1MB
                 tokensFile.exists() &&
-                voicesDir.exists() &&
-                (voicesDir.listFiles()?.size ?: 0) > 0
+                voicesFile.exists()
 
         if (ready) {
-            Log.i(TAG, "Model ready: ${modelFile.length() / 1_000_000}MB, " +
-                    "${voicesDir.listFiles()?.size ?: 0} voices")
+            Log.i(TAG, "Model ready: ${modelFile.length() / 1_000_000}MB model, " +
+                    "${voicesFile.length() / 1_000}KB voices")
         }
         return ready
     }
@@ -114,58 +90,72 @@ class ModelDownloader(private val context: Context) {
     }
 
     /**
-     * Download model files from HuggingFace individually.
-     * This is more reliable than archive download and allows resuming.
+     * Download and extract the Kokoro model zip from GitHub Releases.
      */
     suspend fun downloadModel(listener: ProgressListener) = withContext(Dispatchers.IO) {
         try {
             val dir = getModelDir()
+
+            // If model already ready, skip
+            if (isModelReady()) {
+                Log.i(TAG, "Model already downloaded, skipping")
+                listener.onComplete()
+                return@withContext
+            }
+
+            // Clean any partial downloads
+            dir.deleteRecursively()
             dir.mkdirs()
 
-            val voicesDir = File(dir, "voices")
-            voicesDir.mkdirs()
+            // Step 1: Download zip to temp file
+            val tempZip = File(context.cacheDir, "kokoro-model.zip")
+            if (tempZip.exists()) tempZip.delete()
 
-            // Calculate total files
-            val totalFiles = HF_FILES.size + VOICE_FILES.size
-            var completedFiles = 0
+            Log.i(TAG, "Downloading model zip from $MODEL_ZIP_URL")
+            listener.onProgress(0, -1, "Downloading Kokoro model...")
 
-            // Download main model files
-            for (fileName in HF_FILES) {
-                val targetFile = File(dir, fileName)
-                if (targetFile.exists() && targetFile.length() > 0) {
-                    Log.i(TAG, "Skipping existing file: $fileName")
-                    completedFiles++
-                    listener.onFileComplete(fileName)
-                    continue
-                }
+            val request = Request.Builder()
+                .url(MODEL_ZIP_URL)
+                .header("User-Agent", "ProseCreatorTTS/1.0 (Android)")
+                .build()
 
-                val url = "$HF_BASE/$fileName"
-                downloadFile(url, targetFile, fileName, listener)
-                completedFiles++
-                listener.onFileComplete(fileName)
+            val response = client.newCall(request).execute()
+            if (!response.isSuccessful) {
+                throw RuntimeException("HTTP ${response.code} downloading model")
             }
 
-            // Download voice files
-            for (voiceName in VOICE_FILES) {
-                val fileName = "$voiceName.bin"
-                val targetFile = File(voicesDir, fileName)
-                if (targetFile.exists() && targetFile.length() > 0) {
-                    Log.i(TAG, "Skipping existing voice: $fileName")
-                    completedFiles++
-                    listener.onFileComplete(fileName)
-                    continue
-                }
+            val body = response.body ?: throw RuntimeException("Empty response")
+            val totalBytes = body.contentLength()
+            var bytesDownloaded = 0L
 
-                val url = "$HF_BASE/voices/$fileName"
-                downloadFile(url, targetFile, fileName, listener)
-                completedFiles++
-                listener.onFileComplete(fileName)
+            body.byteStream().use { input ->
+                FileOutputStream(tempZip).use { output ->
+                    val buffer = ByteArray(65536)
+                    var bytesRead: Int
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        output.write(buffer, 0, bytesRead)
+                        bytesDownloaded += bytesRead
+                        listener.onProgress(bytesDownloaded, totalBytes, "Downloading model...")
+                    }
+                }
             }
 
-            // Download espeak-ng-data if available
-            downloadEspeakData(dir, listener)
+            Log.i(TAG, "Download complete: ${tempZip.length()} bytes")
+            listener.onFileComplete("kokoro-model.zip")
 
-            Log.i(TAG, "Model download complete: $completedFiles files")
+            // Step 2: Extract zip
+            listener.onProgress(0, -1, "Extracting model files...")
+            extractZip(tempZip, dir, listener)
+
+            // Clean up zip
+            tempZip.delete()
+
+            // Verify extraction
+            if (!isModelReady()) {
+                throw RuntimeException("Model extraction failed — required files missing")
+            }
+
+            Log.i(TAG, "Model download and extraction complete")
             listener.onComplete()
         } catch (e: Exception) {
             Log.e(TAG, "Download failed", e)
@@ -187,102 +177,42 @@ class ModelDownloader(private val context: Context) {
 
     // ── Private Helpers ─────────────────────────────────────────────────
 
-    private fun downloadFile(
-        url: String,
-        targetFile: File,
-        displayName: String,
-        listener: ProgressListener,
-    ) {
-        Log.i(TAG, "Downloading: $displayName from $url")
+    private fun extractZip(zipFile: File, targetDir: File, listener: ProgressListener) {
+        var entryCount = 0
+        ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+            var entry = zis.nextEntry
+            while (entry != null) {
+                val outFile = File(targetDir, entry.name)
 
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", "ProseCreatorTTS/1.0 (Android)")
-            .build()
-
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            throw RuntimeException("HTTP ${response.code} downloading $displayName")
-        }
-
-        val body = response.body ?: throw RuntimeException("Empty response for $displayName")
-        val totalBytes = body.contentLength()
-        var bytesDownloaded = 0L
-
-        // Write to temp file, then rename (atomic-ish)
-        val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
-        body.byteStream().use { input ->
-            FileOutputStream(tempFile).use { output ->
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-                    bytesDownloaded += bytesRead
-                    listener.onProgress(bytesDownloaded, totalBytes, displayName)
+                // Security: prevent zip slip
+                if (!outFile.canonicalPath.startsWith(targetDir.canonicalPath)) {
+                    Log.w(TAG, "Skipping suspicious zip entry: ${entry.name}")
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                    continue
                 }
-            }
-        }
 
-        // Rename temp to final
-        if (!tempFile.renameTo(targetFile)) {
-            tempFile.copyTo(targetFile, overwrite = true)
-            tempFile.delete()
-        }
-
-        Log.i(TAG, "Downloaded: $displayName (${targetFile.length()} bytes)")
-    }
-
-    /**
-     * Download espeak-ng-data directory.
-     * Some Kokoro configurations need this for phonemization.
-     * If not available, sherpa-onnx falls back to built-in tokenization.
-     */
-    private fun downloadEspeakData(modelDir: File, listener: ProgressListener) {
-        val espeakDir = File(modelDir, "espeak-ng-data")
-        if (espeakDir.exists() && (espeakDir.listFiles()?.size ?: 0) > 0) {
-            Log.i(TAG, "espeak-ng-data already exists, skipping")
-            return
-        }
-
-        // Try downloading the espeak-ng-data archive
-        try {
-            val url = "$HF_BASE/espeak-ng-data/phontab"
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", "ProseCreatorTTS/1.0 (Android)")
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.w(TAG, "espeak-ng-data not available (HTTP ${response.code}), skipping — will use built-in tokenization")
-                response.close()
-                return
-            }
-            response.close()
-
-            // If phontab exists, download the essential espeak-ng files
-            espeakDir.mkdirs()
-            val espeakFiles = listOf(
-                "phontab", "phonindex", "phondata", "intonations",
-                "en_dict", "en_extra"
-            )
-
-            for (fileName in espeakFiles) {
-                val targetFile = File(espeakDir, fileName)
-                try {
-                    downloadFile(
-                        "$HF_BASE/espeak-ng-data/$fileName",
-                        targetFile,
-                        "espeak-ng/$fileName",
-                        listener
-                    )
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to download espeak-ng/$fileName: ${e.message}")
-                    // Non-fatal — continue without this file
+                if (entry.isDirectory) {
+                    outFile.mkdirs()
+                } else {
+                    outFile.parentFile?.mkdirs()
+                    FileOutputStream(outFile).use { fos ->
+                        val buffer = ByteArray(65536)
+                        var len: Int
+                        while (zis.read(buffer).also { len = it } != -1) {
+                            fos.write(buffer, 0, len)
+                        }
+                    }
+                    entryCount++
+                    if (entryCount % 10 == 0) {
+                        listener.onProgress(entryCount.toLong(), -1, "Extracting files...")
+                    }
                 }
+
+                zis.closeEntry()
+                entry = zis.nextEntry
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "espeak-ng-data download skipped: ${e.message}")
         }
+        Log.i(TAG, "Extracted $entryCount files to ${targetDir.absolutePath}")
     }
 }
