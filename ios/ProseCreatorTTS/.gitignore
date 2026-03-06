@@ -1,0 +1,19 @@
+# Xcode
+*.xcuserdata
+*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+
+# Frameworks (built from source, not committed)
+Frameworks/*.xcframework
+
+# Build artifacts
+scripts/sherpa-onnx-build/
+
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+.swiftpm/

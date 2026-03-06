@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ProseCreator TTS</string>
+    <string name="app_subtitle">Your personal voice for every character</string>
+
+    <!-- Section headers -->
+    <string name="model_section_title">Voice Engine</string>
+    <string name="stats_section_title">Session</string>
+    <string name="instructions_title">Getting Started</string>
+
+    <!-- Instructions -->
+    <string name="instructions_no_model">Download the Kokoro voice engine to bring your characters to life.\n\nOnce ready, ProseCreator will automatically find this device on your network.</string>
+    <string name="instructions_stopped">Tap the switch above to start. ProseCreator on your computer will discover this device automatically.\n\nKeep both devices on the same Wi-Fi network.</string>
+    <string name="instructions_running">Ready to narrate. ProseCreator has connected at:\n\nhttp://%1$s:%2$d</string>
+
+    <!-- Footer -->
+    <string name="footer_text">ProseCreator TTS v1.0 · On-device Kokoro voice engine\nAdverant AI</string>
+
+    <!-- Foreground service notification -->
+    <string name="notification_channel_name">TTS Server</string>
+    <string name="notification_title">ProseCreator TTS</string>
+    <string name="notification_text">Listening for narration requests</string>
+</resources>
