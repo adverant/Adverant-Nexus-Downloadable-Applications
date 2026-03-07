@@ -26,7 +26,7 @@ import java.io.ByteArrayInputStream
  */
 class TTSServer(
     port: Int = DEFAULT_PORT,
-    private val engine: TTSEngine,
+    private val engine: SystemTTSEngine,
     private val telemetry: TelemetryReporter = TelemetryReporter(),
 ) : NanoHTTPD(port) {
 
@@ -94,7 +94,7 @@ class TTSServer(
             put("models_available", JSONArray().put("kokoro"))
             put("port", DEFAULT_PORT)
             put("platform", "android")
-            put("engine", "sherpa-onnx")
+            put("engine", "android-system-tts")
             put("sample_rate", engine.getSampleRate())
             put("num_speakers", engine.getNumSpeakers())
             put("total_requests", requestCount)
@@ -148,7 +148,7 @@ class TTSServer(
             )
         }
 
-        val voice = body.optString("voice", TTSEngine.DEFAULT_VOICE)
+        val voice = body.optString("voice", SystemTTSEngine.DEFAULT_VOICE)
         val speed = body.optDouble("speed", 1.0).toFloat().coerceIn(0.25f, 4.0f)
 
         Log.i(TAG, "Speech request: voice=$voice speed=$speed text=${text.take(80)}...")
@@ -192,7 +192,7 @@ class TTSServer(
         response.addHeader("X-TTS-Duration", String.format("%.3f", audioDuration))
         response.addHeader("X-TTS-Voice", voice)
         response.addHeader("X-TTS-Speaker-Id", (synthDiag["speaker_id"]?.toString() ?: "unknown"))
-        response.addHeader("X-TTS-Engine", "sherpa-onnx-kokoro")
+        response.addHeader("X-TTS-Engine", "android-system-tts")
         response.addHeader("X-Processing-Time-Ms", synthElapsed.toString())
 
         // Add diagnostics header
@@ -222,7 +222,7 @@ class TTSServer(
         // Run test synthesis
         val testStartTime = System.currentTimeMillis()
         val (testWav, testDiag) = engine.synthesizeWithDiagnostics(
-            "Hello world, this is a test.", TTSEngine.DEFAULT_VOICE, 1.0f
+            "Hello world, this is a test.", SystemTTSEngine.DEFAULT_VOICE, 1.0f
         )
         val testElapsed = System.currentTimeMillis() - testStartTime
 
@@ -243,7 +243,7 @@ class TTSServer(
             // Test synthesis result
             put("test_synthesis", JSONObject().apply {
                 put("text", "Hello world, this is a test.")
-                put("voice", TTSEngine.DEFAULT_VOICE)
+                put("voice", SystemTTSEngine.DEFAULT_VOICE)
                 put("success", testWav != null)
                 put("time_ms", testElapsed)
                 if (testWav != null) {

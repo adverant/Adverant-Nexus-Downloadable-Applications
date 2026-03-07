@@ -8,7 +8,6 @@ import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import java.io.File
 
 /**
  * TTSForegroundService — Keeps the TTS HTTP server alive when the app is backgrounded.
@@ -37,7 +36,7 @@ class TTSForegroundService : Service() {
 
     private val binder = LocalBinder()
 
-    private var ttsEngine: TTSEngine? = null
+    private var ttsEngine: SystemTTSEngine? = null
     private var ttsServer: TTSServer? = null
 
     @Volatile
@@ -76,21 +75,21 @@ class TTSForegroundService : Service() {
 
     /**
      * Start the TTS engine and HTTP server.
-     * @param modelDir Directory containing the Kokoro model files.
+     * Uses Android's built-in TextToSpeech — no model download needed.
      * @return true if started successfully.
      */
-    fun startServer(modelDir: File): Boolean {
+    fun startServer(): Boolean {
         if (isServerRunning) {
             Log.w(TAG, "Server already running")
             return true
         }
 
         return try {
-            // Initialize TTS engine
-            val engine = TTSEngine.create(modelDir)
+            // Initialize system TTS engine (uses Android built-in TextToSpeech)
+            val engine = SystemTTSEngine.create(this)
             if (engine == null) {
-                Log.e(TAG, "Failed to create TTSEngine")
-                updateNotification(createErrorNotification("Failed to load TTS model"))
+                Log.e(TAG, "Failed to create SystemTTSEngine")
+                updateNotification(createErrorNotification("Failed to initialize TTS"))
                 return false
             }
             ttsEngine = engine

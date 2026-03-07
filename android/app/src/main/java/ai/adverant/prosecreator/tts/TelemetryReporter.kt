@@ -68,8 +68,8 @@ class TelemetryReporter(
                     put("android_model", Build.MODEL)
                     put("android_sdk", Build.VERSION.SDK_INT)
                     put("android_version", Build.VERSION.RELEASE)
-                    put("engine", "sherpa-onnx-kokoro")
-                    put("app_version", "1.0.1")
+                    put("engine", "android-system-tts")
+                    put("app_version", "1.0.3")
                 })
             }
 

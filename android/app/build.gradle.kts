@@ -11,8 +11,8 @@ android {
         applicationId = "ai.adverant.prosecreator.tts"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 3
+        versionName = "1.0.3"
     }
 
     buildTypes {
@@ -46,9 +46,6 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
-        jniLibs {
-            useLegacyPackaging = true
-        }
     }
 }
 
@@ -68,10 +65,7 @@ dependencies {
     // NanoHTTPD — lightweight HTTP server
     implementation("org.nanohttpd:nanohttpd:2.3.1")
 
-    // sherpa-onnx — on-device TTS with Kokoro model
-    implementation("com.github.k2-fsa:sherpa-onnx:1.12.28")
-
-    // OkHttp for model downloads
+    // OkHttp for telemetry reporting
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // JSON

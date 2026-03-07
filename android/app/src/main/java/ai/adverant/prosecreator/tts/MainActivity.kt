@@ -24,9 +24,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.materialswitch.MaterialSwitch
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -79,8 +77,6 @@ class MainActivity : AppCompatActivity() {
 
     private var service: TTSForegroundService? = null
     private var bound = false
-    private lateinit var downloader: ModelDownloader
-    private var downloadJob: Job? = null
     private var statsTimer: Timer? = null
 
     private val connection = object : ServiceConnection {
@@ -106,11 +102,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        downloader = ModelDownloader(this)
         bindViews()
         setupListeners()
         requestPermissions()
-        updateModelStatus()
+        hideModelCard()
         updateUI(false)
     }
 
@@ -124,7 +119,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        updateModelStatus()
         startStatsTimer()
     }
 
@@ -180,20 +174,6 @@ class MainActivity : AppCompatActivity() {
                 startServer()
             }
         }
-
-        downloadButton.setOnClickListener {
-            downloadModel()
-        }
-
-        deleteModelButton.setOnClickListener {
-            if (service?.isServerRunning == true) {
-                Toast.makeText(this, "Stop the server before deleting the model", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            downloader.deleteModel()
-            updateModelStatus()
-            Toast.makeText(this, "Model deleted", Toast.LENGTH_SHORT).show()
-        }
     }
 
     // ── Permissions ─────────────────────────────────────────────────────
@@ -217,14 +197,6 @@ class MainActivity : AppCompatActivity() {
     // ── Server Control ──────────────────────────────────────────────────
 
     private fun startServer() {
-        if (!downloader.isModelReady()) {
-            Toast.makeText(this, "Download the model first", Toast.LENGTH_SHORT).show()
-            serverToggle.isChecked = false
-            return
-        }
-
-        val modelDir = downloader.getModelDir()
-
         // Start the foreground service
         val intent = Intent(this, TTSForegroundService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -252,7 +224,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val success = withContext(Dispatchers.IO) {
-                svc.startServer(modelDir)
+                svc.startServer()
             }
 
             withContext(Dispatchers.Main) {
@@ -278,68 +250,12 @@ class MainActivity : AppCompatActivity() {
         startService(intent)
     }
 
-    // ── Model Download ──────────────────────────────────────────────────
-
-    private fun downloadModel() {
-        if (downloadJob?.isActive == true) {
-            Toast.makeText(this, "Download already in progress", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        downloadButton.isEnabled = false
-        downloadProgress.visibility = View.VISIBLE
-        downloadProgressText.visibility = View.VISIBLE
-        downloadProgress.isIndeterminate = false
-        downloadProgress.progress = 0
-
-        downloadJob = lifecycleScope.launch {
-            downloader.downloadModel(object : ModelDownloader.ProgressListener {
-                override fun onProgress(bytesDownloaded: Long, totalBytes: Long, fileName: String) {
-                    val pct = if (totalBytes > 0) (bytesDownloaded * 100 / totalBytes).toInt() else 0
-                    val downloadedMB = bytesDownloaded / 1_000_000.0
-                    val totalMB = totalBytes / 1_000_000.0
-                    runOnUiThread {
-                        downloadProgress.progress = pct
-                        downloadProgressText.text = String.format(
-                            Locale.US,
-                            "Downloading %s: %.1f / %.1f MB (%d%%)",
-                            fileName, downloadedMB, totalMB, pct
-                        )
-                    }
-                }
-
-                override fun onFileComplete(fileName: String) {
-                    runOnUiThread {
-                        downloadProgressText.text = "Downloaded: $fileName"
-                    }
-                }
-
-                override fun onComplete() {
-                    runOnUiThread {
-                        downloadProgress.visibility = View.GONE
-                        downloadProgressText.visibility = View.GONE
-                        downloadButton.isEnabled = true
-                        updateModelStatus()
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Model downloaded successfully!",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-
-                override fun onError(error: String) {
-                    runOnUiThread {
-                        downloadProgress.visibility = View.GONE
-                        downloadProgressText.text = "Error: $error"
-                        downloadButton.isEnabled = true
-                    }
-                }
-            })
-        }
-    }
-
     // ── UI Updates ──────────────────────────────────────────────────────
+
+    /** Hide the model download card — system TTS needs no model download. */
+    private fun hideModelCard() {
+        modelCard.visibility = View.GONE
+    }
 
     private fun updateUI(running: Boolean) {
         val green = ContextCompat.getColor(this, R.color.status_running)
@@ -362,20 +278,15 @@ class MainActivity : AppCompatActivity() {
         }
         portText.text = "Port ${TTSServer.DEFAULT_PORT}"
 
-        // Toggle
+        // Toggle — always enabled (system TTS needs no model download)
         serverToggle.isChecked = running
         startStopButton.text = if (running) "Stop Server" else "Start Server"
-
-        // Enable/disable start based on model availability
-        val modelReady = downloader.isModelReady()
-        startStopButton.isEnabled = modelReady
-        serverToggle.isEnabled = modelReady
+        startStopButton.isEnabled = true
+        serverToggle.isEnabled = true
 
         // Instructions
         if (running && ip != null) {
             instructionsText.text = getString(R.string.instructions_running, ip, TTSServer.DEFAULT_PORT)
-        } else if (!modelReady) {
-            instructionsText.text = getString(R.string.instructions_no_model)
         } else {
             instructionsText.text = getString(R.string.instructions_stopped)
         }
@@ -384,38 +295,10 @@ class MainActivity : AppCompatActivity() {
         updateStats()
     }
 
-    private fun updateModelStatus() {
-        val ready = downloader.isModelReady()
-        val sizeOnDisk = downloader.getModelSizeOnDisk()
-
-        if (ready) {
-            modelStatusText.text = "Kokoro 82M — Ready"
-            modelStatusText.setTextColor(ContextCompat.getColor(this, R.color.status_running))
-            modelSizeText.text = String.format(Locale.US, "Size: %.1f MB", sizeOnDisk / 1_000_000.0)
-            modelSizeText.visibility = View.VISIBLE
-            downloadButton.text = "Re-download"
-            deleteModelButton.visibility = View.VISIBLE
-        } else {
-            modelStatusText.text = "Voice engine not downloaded"
-            modelStatusText.setTextColor(ContextCompat.getColor(this, R.color.md_theme_on_surface_variant))
-            modelSizeText.visibility = View.GONE
-            downloadButton.text = "Download Kokoro Model (~100 MB)"
-            deleteModelButton.visibility = View.GONE
-        }
-
-        // Update start button state
-        startStopButton.isEnabled = ready
-        serverToggle.isEnabled = ready
-    }
-
     private fun updateStats() {
         val server = service?.getServer()
         if (server != null && service?.isServerRunning == true) {
-            val engine = TTSEngine.create(downloader.getModelDir())
-            val voiceCount = engine?.getAvailableVoices()?.size ?: TTSEngine.KOKORO_VOICES.size
-            engine?.release()
-
-            voiceCountText.text = "$voiceCount"
+            voiceCountText.text = "${SystemTTSEngine.KOKORO_VOICES.size}"
             requestCountText.text = "${server.requestCount}"
             audioGeneratedText.text = String.format(
                 Locale.US,
