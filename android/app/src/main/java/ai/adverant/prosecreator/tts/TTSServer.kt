@@ -1,9 +1,7 @@
 package ai.adverant.prosecreator.tts
 
-import android.util.Base64
 import android.util.Log
 import fi.iki.elonen.NanoHTTPD
-import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
@@ -14,12 +12,14 @@ import java.io.ByteArrayInputStream
  * Runs on port 8881 and serves audio to the ProseCreator web app on the same WiFi network.
  *
  * Endpoints:
- *   GET  /health                   — Health check (matches Mac TTS server contract)
- *   GET  /v1/models                — List loaded models
- *   GET  /v1/audio/voices          — List available Kokoro voices
- *   POST /v1/audio/speech          — Generate speech (returns WAV audio)
- *   POST /v1/audio/speech/validate — Generate + validate with Gemini transcription
- *   GET  /diagnostics              — Full engine diagnostics
+ *   GET  /health           — Health check (matches Mac TTS server contract)
+ *   GET  /v1/models        — List loaded models
+ *   GET  /v1/audio/voices  — List available Kokoro voices
+ *   POST /v1/audio/speech  — Generate speech (returns WAV audio with diagnostics headers)
+ *   GET  /diagnostics      — Full engine diagnostics (model files, test synthesis, audio stats)
+ *
+ * Audio validation (Gemini transcription) is handled server-side by the Nexus backend,
+ * NOT on-device. The Android app has zero API keys or secrets.
  *
  * CORS headers are added to all responses so the browser can call this server
  * directly from the ProseCreator web app (different origin).
@@ -36,8 +36,6 @@ class TTSServer(
         private const val MIME_JSON = "application/json"
         private const val MIME_WAV = "audio/wav"
     }
-
-    private val geminiValidator = GeminiValidator()
 
     /** Track total requests served (for status display) */
     @Volatile
@@ -67,7 +65,6 @@ class TTSServer(
                 method == Method.GET && uri == "/health" -> handleHealth()
                 method == Method.GET && uri == "/v1/models" -> handleModels()
                 method == Method.GET && uri == "/v1/audio/voices" -> handleVoices()
-                method == Method.POST && uri == "/v1/audio/speech/validate" -> handleSpeechValidate(session)
                 method == Method.POST && uri == "/v1/audio/speech" -> handleSpeech(session)
                 method == Method.GET && uri == "/diagnostics" -> handleDiagnostics()
                 else -> newCorsResponse(
@@ -152,9 +149,8 @@ class TTSServer(
 
         val voice = body.optString("voice", TTSEngine.DEFAULT_VOICE)
         val speed = body.optDouble("speed", 1.0).toFloat().coerceIn(0.25f, 4.0f)
-        val shouldValidate = body.optBoolean("validate", false)
 
-        Log.i(TAG, "Speech request: voice=$voice speed=$speed validate=$shouldValidate text=${text.take(80)}...")
+        Log.i(TAG, "Speech request: voice=$voice speed=$speed text=${text.take(80)}...")
 
         // Generate audio with diagnostics
         val startTime = System.currentTimeMillis()
@@ -180,25 +176,7 @@ class TTSServer(
 
         Log.i(TAG, "Generated ${wavBytes.size} bytes (${String.format("%.1f", audioDuration)}s) in ${synthElapsed}ms for voice=$voice")
 
-        // Optional Gemini validation
-        var validationJson: String? = null
-        if (shouldValidate) {
-            try {
-                val validationResult = runBlocking {
-                    geminiValidator.validate(wavBytes, text)
-                }
-                validationJson = validationResult.toJson().toString()
-                Log.i(TAG, "Validation: passed=${validationResult.passed}, accuracy=${String.format("%.1f%%", validationResult.wordAccuracy * 100)}")
-            } catch (e: Exception) {
-                Log.w(TAG, "Validation failed: ${e.message}")
-                validationJson = JSONObject().apply {
-                    put("validation_failed", true)
-                    put("error", e.message)
-                }.toString()
-            }
-        }
-
-        // Return WAV audio
+        // Return WAV audio with diagnostic headers
         val response = newFixedLengthResponse(
             Response.Status.OK,
             MIME_WAV,
@@ -224,123 +202,14 @@ class TTSServer(
         }
         response.addHeader("X-TTS-Diagnostics", diagSummary.toString())
 
-        if (validationJson != null) {
-            response.addHeader("X-TTS-Validation", validationJson)
-        }
-
         return response
-    }
-
-    // ── POST /v1/audio/speech/validate ───────────────────────────────────
-
-    /**
-     * Generate speech AND validate with Gemini transcription.
-     * Returns JSON with base64 audio, validation result, and diagnostics.
-     */
-    private fun handleSpeechValidate(session: IHTTPSession): Response {
-        val body = parseJsonBody(session) ?: return newCorsResponse(
-            Response.Status.BAD_REQUEST, MIME_JSON, errorJson("Missing or invalid JSON body")
-        )
-
-        val text = body.optString("input", "").ifBlank { body.optString("text", "") }
-        if (text.isBlank()) {
-            return newCorsResponse(
-                Response.Status.BAD_REQUEST, MIME_JSON, errorJson("Missing 'input' or 'text' field")
-            )
-        }
-
-        val voice = body.optString("voice", TTSEngine.DEFAULT_VOICE)
-        val speed = body.optDouble("speed", 1.0).toFloat().coerceIn(0.25f, 4.0f)
-
-        // Extract proper nouns from request if provided
-        val properNouns = mutableListOf<String>()
-        val nounsArray = body.optJSONArray("proper_nouns")
-        if (nounsArray != null) {
-            for (i in 0 until nounsArray.length()) {
-                properNouns.add(nounsArray.getString(i))
-            }
-        }
-
-        Log.i(TAG, "Speech+Validate request: voice=$voice speed=$speed text=${text.take(80)}...")
-
-        // Step 1: Generate audio with diagnostics
-        val (wavBytes, synthDiag) = engine.synthesizeWithDiagnostics(text, voice, speed)
-
-        if (wavBytes == null) {
-            val responseJson = JSONObject().apply {
-                put("error", "synthesis_failed")
-                put("diagnostics", mapToJson(synthDiag))
-            }
-            return newCorsResponse(Response.Status.INTERNAL_ERROR, MIME_JSON, responseJson.toString())
-        }
-
-        val audioDuration = calculateWavDuration(wavBytes)
-        totalAudioSeconds += audioDuration
-
-        // Step 2: Validate with Gemini
-        val validationResult = try {
-            runBlocking {
-                geminiValidator.validate(wavBytes, text, properNouns)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Gemini validation failed", e)
-            GeminiValidator.ValidationResult(
-                passed = false,
-                transcription = "",
-                missingWords = emptyList(),
-                extraWords = emptyList(),
-                wordAccuracy = -1f,
-                droppedNames = emptyList(),
-                overallClarity = -1,
-                validationFailed = true,
-                errorMessage = "${e.javaClass.simpleName}: ${e.message}",
-                validationTimeMs = 0,
-            )
-        }
-
-        // Step 3: Build comprehensive response
-        val audioBase64 = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
-
-        val responseJson = JSONObject().apply {
-            put("audio_base64", audioBase64)
-            put("audio_mime_type", "audio/wav")
-            put("validation", validationResult.toJson())
-            put("diagnostics", JSONObject().apply {
-                put("engine", "sherpa-onnx-kokoro")
-                put("model_loaded", true)
-                put("speaker_id", synthDiag["speaker_id"] ?: -1)
-                put("voice_requested", voice)
-                put("voice_resolved", synthDiag["voice_resolved"] ?: "unknown")
-                put("sample_rate", synthDiag["sample_rate"] ?: TTSEngine.SAMPLE_RATE)
-                put("audio_duration_s", audioDuration)
-                put("synthesis_time_ms", synthDiag["synthesis_time_ms"] ?: -1)
-                put("validation_time_ms", validationResult.validationTimeMs)
-                put("audio_size_bytes", wavBytes.size)
-                put("num_samples", synthDiag["num_samples"] ?: 0)
-
-                // Audio quality stats
-                val audioStats = synthDiag["audio_stats"]
-                if (audioStats is Map<*, *>) {
-                    put("audio_stats", mapToJson(audioStats))
-                }
-
-                val qualityWarning = synthDiag["quality_warning"]
-                if (qualityWarning != null) put("quality_warning", qualityWarning)
-            })
-        }
-
-        Log.i(TAG, "Speech+Validate complete: passed=${validationResult.passed}, " +
-                "accuracy=${String.format("%.1f%%", validationResult.wordAccuracy * 100)}, " +
-                "audio=${wavBytes.size} bytes")
-
-        return newCorsResponse(Response.Status.OK, MIME_JSON, responseJson.toString())
     }
 
     // ── GET /diagnostics ─────────────────────────────────────────────────
 
     /**
      * Returns comprehensive engine diagnostics including model file status,
-     * engine configuration, and a test synthesis result.
+     * engine configuration, and a test synthesis result with audio quality stats.
      */
     private fun handleDiagnostics(): Response {
         val engineDiag = engine.getDiagnostics()
@@ -376,7 +245,6 @@ class TTSServer(
                     put("audio_bytes", testWav.size)
                     put("duration_s", calculateWavDuration(testWav))
                 }
-                // Include audio stats from test
                 val testAudioStats = testDiag["audio_stats"]
                 if (testAudioStats is Map<*, *>) {
                     put("audio_stats", mapToJson(testAudioStats))
@@ -405,7 +273,7 @@ class TTSServer(
         response.addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept")
         response.addHeader("Access-Control-Expose-Headers",
             "X-TTS-Duration, X-TTS-Voice, X-TTS-Speaker-Id, X-TTS-Engine, " +
-            "X-Processing-Time-Ms, X-TTS-Diagnostics, X-TTS-Validation, X-TTS-Error-Code")
+            "X-Processing-Time-Ms, X-TTS-Diagnostics")
     }
 
     // ── Utility ─────────────────────────────────────────────────────────
