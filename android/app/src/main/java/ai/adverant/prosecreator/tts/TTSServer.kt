@@ -27,6 +27,7 @@ import java.io.ByteArrayInputStream
 class TTSServer(
     port: Int = DEFAULT_PORT,
     private val engine: TTSEngine,
+    private val telemetry: TelemetryReporter = TelemetryReporter(),
 ) : NanoHTTPD(port) {
 
     companion object {
@@ -158,6 +159,7 @@ class TTSServer(
         val synthElapsed = System.currentTimeMillis() - startTime
 
         if (wavBytes == null) {
+            telemetry.reportSynthesis(text, voice, durationS = 0.0, processingMs = synthElapsed, error = "Speech synthesis failed")
             val diagJson = JSONObject(synthDiag.mapValues { it.value.toString() })
             return newCorsResponse(
                 Response.Status.INTERNAL_ERROR,
@@ -175,6 +177,9 @@ class TTSServer(
         totalAudioSeconds += audioDuration
 
         Log.i(TAG, "Generated ${wavBytes.size} bytes (${String.format("%.1f", audioDuration)}s) in ${synthElapsed}ms for voice=$voice")
+
+        // Fire-and-forget telemetry to Nexus server
+        telemetry.reportSynthesis(text, voice, durationS = audioDuration, processingMs = synthElapsed)
 
         // Return WAV audio with diagnostic headers
         val response = newFixedLengthResponse(
